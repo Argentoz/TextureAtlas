@@ -41,7 +41,75 @@ class TextureAtlasTest {
     }
 
     @Test
-    void addFallsBackToRepackWhenAppendPathRunsOutOfSpace() {
+    void addReusesDeletedSpaceAndTracksLeftoverFreeArea() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
+
+        AtlasTexture t1 = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
+        AtlasTexture t2 = atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);
+        AtlasTexture t3 = atlas.addTexture(alphaBytes(4, 4, 3), 4, 4);
+        atlas.consumeDirtyRegions();
+
+        assertTrue(atlas.removeTexture(t2));
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(4, 0, 4, 4)}, atlas.consumeDirtyRegions());
+
+        AtlasTexture t4 = atlas.addTexture(alphaBytes(2, 4, 4), 2, 4);
+        assertEquals(4, t4.x());
+        assertEquals(0, t4.y());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(4, 0, 2, 4)}, atlas.consumeDirtyRegions());
+
+        AtlasTexture t5 = atlas.addTexture(alphaBytes(2, 4, 5), 2, 4);
+
+        assertTrue(t4.isAlive());
+        assertTrue(t5.isAlive());
+        assertEquals(8, atlas.height());
+        assertEquals(6, t5.x());
+        assertEquals(0, t5.y());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(6, 0, 2, 4)}, atlas.consumeDirtyRegions());
+
+        Set<String> occupiedCells = new HashSet<>();
+        occupiedCells.add(t1.x() + "," + t1.y());
+        occupiedCells.add(t3.x() + "," + t3.y());
+        occupiedCells.add(t4.x() + "," + t4.y());
+        occupiedCells.add(t5.x() + "," + t5.y());
+        assertEquals(Set.of("0,0", "4,0", "6,0", "0,4"), occupiedCells);
+
+        assertFalse(t2.isAlive());
+        assertTexturePixels(atlas, t5, alphaBytes(2, 4, 5));
+    }
+
+    @Test
+    void splitFreeSpaceStoresRightAndBottomRemainders() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
+
+        AtlasTexture left = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
+        atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);
+        atlas.consumeDirtyRegions();
+
+        assertTrue(atlas.removeTexture(left));
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture small = atlas.addTexture(alphaBytes(2, 2, 3), 2, 2);
+        assertEquals(0, small.x());
+        assertEquals(0, small.y());
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture rightRemainder = atlas.addTexture(alphaBytes(2, 4, 4), 2, 4);
+        assertEquals(2, rightRemainder.x());
+        assertEquals(0, rightRemainder.y());
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture bottomRemainder = atlas.addTexture(alphaBytes(2, 2, 5), 2, 2);
+        assertEquals(0, bottomRemainder.x());
+        assertEquals(2, bottomRemainder.y());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 2, 2, 2)}, atlas.consumeDirtyRegions());
+
+        assertTexturePixels(atlas, small, alphaBytes(2, 2, 3));
+        assertTexturePixels(atlas, rightRemainder, alphaBytes(2, 4, 4));
+        assertTexturePixels(atlas, bottomRemainder, alphaBytes(2, 2, 5));
+    }
+
+    @Test
+    void addFallsBackToRepackWhenNoSingleHoleFits() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
 
         AtlasTexture t1 = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
@@ -50,24 +118,24 @@ class TextureAtlasTest {
         AtlasTexture t4 = atlas.addTexture(alphaBytes(4, 4, 4), 4, 4);
         atlas.consumeDirtyRegions();
 
-        assertTrue(atlas.removeTexture(t2));
+        assertTrue(atlas.removeTexture(t1));
+        assertTrue(atlas.removeTexture(t4));
         atlas.consumeDirtyRegions();
 
-        AtlasTexture t5 = atlas.addTexture(alphaBytes(4, 4, 5), 4, 4);
+        AtlasTexture wide = atlas.addTexture(alphaBytes(8, 4, 9), 8, 4);
 
-        assertTrue(t5.isAlive());
+        assertTrue(wide.isAlive());
         assertEquals(8, atlas.height());
+        assertEquals(0, wide.x());
+        assertEquals(0, wide.y());
         assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 8, 8)}, atlas.consumeDirtyRegions());
 
         Set<String> occupiedCells = new HashSet<>();
-        occupiedCells.add(t1.x() + "," + t1.y());
+        occupiedCells.add(wide.x() + "," + wide.y());
+        occupiedCells.add(t2.x() + "," + t2.y());
         occupiedCells.add(t3.x() + "," + t3.y());
-        occupiedCells.add(t4.x() + "," + t4.y());
-        occupiedCells.add(t5.x() + "," + t5.y());
-        assertEquals(Set.of("0,0", "4,0", "0,4", "4,4"), occupiedCells);
-
-        assertFalse(t2.isAlive());
-        assertTexturePixels(atlas, t5, alphaBytes(4, 4, 5));
+        assertEquals(Set.of("0,0", "0,4", "4,4"), occupiedCells);
+        assertTexturePixels(atlas, wide, alphaBytes(8, 4, 9));
     }
 
     @Test

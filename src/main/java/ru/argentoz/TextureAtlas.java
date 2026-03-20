@@ -16,6 +16,7 @@ public final class TextureAtlas {
     private final int rowStrideBytes;
     private final byte[] pixels;
     private final ArrayList<AtlasTexture> textures = new ArrayList<>();
+    private final ArrayList<FreeRect> freeRects = new ArrayList<>();
     private final STBRectPack rectPack = new STBRectPack();
     private final DirtyTracker dirtyTracker = new DirtyTracker(DEFAULT_DIRTY_CAPACITY);
 
@@ -86,6 +87,12 @@ public final class TextureAtlas {
         validateTextureBytes(bytes, width, height);
 
         AtlasTexture texture = new AtlasTexture(this);
+        FreePlacement freePlacement = tryPlaceIntoFreeRect(width, height);
+        if (freePlacement != null) {
+            applyFreeRectAdd(texture, bytes, freePlacement.x, freePlacement.y, width, height);
+            return texture;
+        }
+
         AppendPlacement placement = tryAppend(width, height);
         if (placement != null) {
             applyAppendAdd(texture, bytes, placement.x, placement.y, width, height, placement.newRowHeight,
@@ -120,9 +127,12 @@ public final class TextureAtlas {
         if (textures.isEmpty()) {
             contentBottom = 0;
             currentHeight = 1;
+            freeRects.clear();
         } else {
             contentBottom = recomputeContentBottom();
             currentHeight = atlasHeightForContent(contentBottom);
+            trimFreeRectsToCurrentHeight();
+            addFreeRect(removedX, removedY, removedWidth, removedHeight);
         }
         resetAppendState();
 
@@ -183,6 +193,51 @@ public final class TextureAtlas {
         int newHeight = atlasHeightForContent(newContentBottom);
 
         return new AppendPlacement(candidateX, candidateY, Math.max(candidateRowHeight, height), newHeight);
+    }
+
+    private FreePlacement tryPlaceIntoFreeRect(int width, int height) {
+        int bestIndex = -1;
+        int bestWaste = Integer.MAX_VALUE;
+        int bestShortSideWaste = Integer.MAX_VALUE;
+        int bestY = Integer.MAX_VALUE;
+        int bestX = Integer.MAX_VALUE;
+
+        for (int i = 0; i < freeRects.size(); i++) {
+            FreeRect freeRect = freeRects.get(i);
+            if (width > freeRect.width || height > freeRect.height) {
+                continue;
+            }
+
+            int waste = freeRect.width * freeRect.height - width * height;
+            int shortSideWaste = Math.min(freeRect.width - width, freeRect.height - height);
+            if (waste < bestWaste
+                || (waste == bestWaste && shortSideWaste < bestShortSideWaste)
+                || (waste == bestWaste && shortSideWaste == bestShortSideWaste
+                && (freeRect.y < bestY || (freeRect.y == bestY && freeRect.x < bestX)))) {
+                bestIndex = i;
+                bestWaste = waste;
+                bestShortSideWaste = shortSideWaste;
+                bestX = freeRect.x;
+                bestY = freeRect.y;
+            }
+        }
+
+        if (bestIndex < 0) {
+            return null;
+        }
+
+        FreeRect freeRect = freeRects.remove(bestIndex);
+        // Split the consumed free rect into non-overlapping right and bottom leftovers.
+        addFreeRect(freeRect.x + width, freeRect.y, freeRect.width - width, freeRect.height);
+        addFreeRect(freeRect.x, freeRect.y + height, width, freeRect.height - height);
+        return new FreePlacement(freeRect.x, freeRect.y);
+    }
+
+    private void applyFreeRectAdd(AtlasTexture texture, byte[] bytes, int x, int y, int width, int height) {
+        copyIntoAtlas(bytes, x, y, width, height);
+        texture.setRegion(x, y, width, height);
+        textures.add(texture);
+        dirtyTracker.mark(x, y, width, height);
     }
 
     private void applyAppendAdd(AtlasTexture texture,
@@ -317,6 +372,7 @@ public final class TextureAtlas {
 
         contentBottom = usedBottom;
         currentHeight = newHeight;
+        freeRects.clear();
         resetAppendState();
         markWholeAtlasDirty();
     }
@@ -371,6 +427,83 @@ public final class TextureAtlas {
 
     private void markWholeAtlasDirty() {
         dirtyTracker.mark(0, 0, maxWidth, currentHeight);
+    }
+
+    private void trimFreeRectsToCurrentHeight() {
+        for (int i = freeRects.size() - 1; i >= 0; i--) {
+            FreeRect freeRect = freeRects.get(i);
+            if (freeRect.y >= currentHeight) {
+                freeRects.remove(i);
+                continue;
+            }
+            int clippedHeight = Math.min(freeRect.bottom(), currentHeight) - freeRect.y;
+            if (clippedHeight <= 0) {
+                freeRects.remove(i);
+            } else {
+                freeRect.height = clippedHeight;
+            }
+        }
+    }
+
+    private void addFreeRect(int x, int y, int width, int height) {
+        if (width <= 0 || height <= 0 || x < 0 || y < 0 || x + width > maxWidth) {
+            return;
+        }
+        if (y >= currentHeight) {
+            return;
+        }
+
+        int clippedHeight = Math.min(y + height, currentHeight) - y;
+        if (clippedHeight <= 0) {
+            return;
+        }
+
+        FreeRect mergedRect = new FreeRect(x, y, width, clippedHeight);
+        int index = 0;
+        while (index < freeRects.size()) {
+            FreeRect existing = freeRects.get(index);
+            if (contains(mergedRect, existing)) {
+                freeRects.remove(index);
+                continue;
+            }
+            if (contains(existing, mergedRect)) {
+                return;
+            }
+            if (canMerge(mergedRect, existing)) {
+                mergedRect = merge(mergedRect, existing);
+                freeRects.remove(index);
+                index = 0;
+                continue;
+            }
+            index++;
+        }
+        freeRects.add(mergedRect);
+    }
+
+    private static boolean contains(FreeRect outer, FreeRect inner) {
+        return outer.x <= inner.x
+            && outer.y <= inner.y
+            && outer.right() >= inner.right()
+            && outer.bottom() >= inner.bottom();
+    }
+
+    private static boolean canMerge(FreeRect first, FreeRect second) {
+        return (first.y == second.y
+            && first.height == second.height
+            && first.x <= second.right()
+            && second.x <= first.right())
+            || (first.x == second.x
+            && first.width == second.width
+            && first.y <= second.bottom()
+            && second.y <= first.bottom());
+    }
+
+    private static FreeRect merge(FreeRect first, FreeRect second) {
+        int minX = Math.min(first.x, second.x);
+        int minY = Math.min(first.y, second.y);
+        int maxX = Math.max(first.right(), second.right());
+        int maxY = Math.max(first.bottom(), second.bottom());
+        return new FreeRect(minX, minY, maxX - minX, maxY - minY);
     }
 
     private void resetAppendState() {
@@ -440,7 +573,33 @@ public final class TextureAtlas {
         return (int) value;
     }
 
+    private record FreePlacement(int x, int y) {
+    }
+
     private record AppendPlacement(int x, int y, int newRowHeight, int newHeight) {
+    }
+
+    private static final class FreeRect {
+
+        private final int x;
+        private final int y;
+        private final int width;
+        private int height;
+
+        private FreeRect(int x, int y, int width, int height) {
+            this.x = x;
+            this.y = y;
+            this.width = width;
+            this.height = height;
+        }
+
+        private int right() {
+            return x + width;
+        }
+
+        private int bottom() {
+            return y + height;
+        }
     }
 
     private static final class DirtyTracker {

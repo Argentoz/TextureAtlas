@@ -79,6 +79,18 @@ public final class TextureAtlas {
         return dirtyTracker.consume();
     }
 
+    public DirtyRegion[] freeRegions() {
+        if (freeRects.isEmpty()) {
+            return EMPTY_DIRTY_REGIONS;
+        }
+        DirtyRegion[] regions = new DirtyRegion[freeRects.size()];
+        for (int i = 0; i < freeRects.size(); i++) {
+            FreeRect freeRect = freeRects.get(i);
+            regions[i] = new DirtyRegion(freeRect.x, freeRect.y, freeRect.width, freeRect.height);
+        }
+        return regions;
+    }
+
     public void clearDirty() {
         dirtyTracker.clear();
     }

@@ -1,0 +1,40 @@
+plugins {
+    id 'application'
+}
+
+import java.util.Locale
+
+def lwjglVersion = '3.3.6'
+def osName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+def osArch = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
+def lwjglNatives =
+    osName.contains('win') ? (osArch.contains('aarch64') || osArch.contains('arm64') ? 'natives-windows-arm64' : 'natives-windows') :
+    osName.contains('mac') ? (osArch.contains('aarch64') || osArch.contains('arm64') ? 'natives-macos-arm64' : 'natives-macos') :
+    (osArch.contains('aarch64') || osArch.contains('arm64') ? 'natives-linux-arm64' : 'natives-linux')
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+application {
+    mainClass = 'ru.argentoz.demo.AtlasDemoApp'
+}
+
+dependencies {
+    implementation project(':')
+
+    implementation platform("org.lwjgl:lwjgl-bom:${lwjglVersion}")
+    implementation 'org.lwjgl:lwjgl'
+    implementation 'org.lwjgl:lwjgl-glfw'
+    implementation 'org.lwjgl:lwjgl-opengl'
+    implementation 'org.lwjgl:lwjgl-nanovg'
+    implementation 'org.lwjgl:lwjgl-nfd'
+
+    runtimeOnly "org.lwjgl:lwjgl::${lwjglNatives}"
+    runtimeOnly "org.lwjgl:lwjgl-glfw::${lwjglNatives}"
+    runtimeOnly "org.lwjgl:lwjgl-opengl::${lwjglNatives}"
+    runtimeOnly "org.lwjgl:lwjgl-nanovg::${lwjglNatives}"
+    runtimeOnly "org.lwjgl:lwjgl-nfd::${lwjglNatives}"
+}

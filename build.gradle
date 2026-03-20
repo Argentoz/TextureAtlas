@@ -1,12 +1,23 @@
 plugins {
-    id 'java'
+    id 'java-library'
 }
 
 group = 'ru.argentoz'
 version = '1.0-SNAPSHOT'
 
-repositories {
-    mavenCentral()
+allprojects {
+    group = rootProject.group
+    version = rootProject.version
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
 }
 
 dependencies {
@@ -15,6 +26,6 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-test {
+tasks.withType(Test).configureEach {
     useJUnitPlatform()
 }

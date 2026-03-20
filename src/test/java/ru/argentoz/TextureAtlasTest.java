@@ -41,6 +41,43 @@ class TextureAtlasTest {
     }
 
     @Test
+    void paddingAddsGapWithoutChangingHandleSize() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8, 1);
+
+        AtlasTexture first = atlas.addTexture(alphaBytes(2, 2, 7), 2, 2);
+        AtlasTexture second = atlas.addTexture(alphaBytes(2, 2, 9), 2, 2);
+
+        assertEquals(1, atlas.padding());
+        assertEquals(0, first.x());
+        assertEquals(0, first.y());
+        assertEquals(3, second.x());
+        assertEquals(0, second.y());
+        assertEquals(2, second.width());
+        assertEquals(2, second.height());
+        assertEquals(2, atlas.height());
+        assertGapIsZero(atlas, 2, 0, 1, 2);
+        assertTexturePixels(atlas, first, alphaBytes(2, 2, 7));
+        assertTexturePixels(atlas, second, alphaBytes(2, 2, 9));
+    }
+
+    @Test
+    void paddingAffectsRowAdvanceEvenWhenAtlasHeightIgnoresTrailingPadding() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 4, 16, 2);
+
+        AtlasTexture first = atlas.addTexture(alphaBytes(1, 1, 1), 1, 1);
+        assertEquals(1, atlas.height());
+
+        AtlasTexture second = atlas.addTexture(alphaBytes(1, 1, 2), 1, 1);
+
+        assertEquals(0, first.x());
+        assertEquals(0, first.y());
+        assertEquals(0, second.x());
+        assertEquals(3, second.y());
+        assertEquals(4, atlas.height());
+        assertGapIsZero(atlas, 0, 1, 1, 2);
+    }
+
+    @Test
     void addReusesDeletedSpaceAndTracksLeftoverFreeArea() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
 
@@ -216,6 +253,19 @@ class TextureAtlasTest {
         int length = rows * atlas.width() * atlas.format().bytesPerPixel();
         for (int i = 0; i < length; i++) {
             assertEquals(0, atlas.pixels()[i], "byte index " + i + " must be zero");
+        }
+    }
+
+    private static void assertGapIsZero(TextureAtlas atlas, int x, int y, int width, int height) {
+        int bytesPerPixel = atlas.format().bytesPerPixel();
+        for (int row = 0; row < height; row++) {
+            for (int column = 0; column < width; column++) {
+                int offset = ((y + row) * atlas.width() + x + column) * bytesPerPixel;
+                for (int channel = 0; channel < bytesPerPixel; channel++) {
+                    assertEquals(0, atlas.pixels()[offset + channel],
+                        "gap pixel at (" + (x + column) + ", " + (y + row) + ") must be zero");
+                }
+            }
         }
     }
 }

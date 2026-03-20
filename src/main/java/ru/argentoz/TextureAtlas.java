@@ -12,6 +12,7 @@ public final class TextureAtlas {
     private final AtlasFormat format;
     private final int maxWidth;
     private final int maxHeight;
+    private final int padding;
     private final int bytesPerPixel;
     private final int rowStrideBytes;
     private final byte[] pixels;
@@ -23,11 +24,16 @@ public final class TextureAtlas {
     private byte[] repackScratch;
     private int currentHeight = 1;
     private int contentBottom;
+    private int layoutBottom;
     private int appendX;
     private int appendY;
     private int appendRowHeight;
 
     public TextureAtlas(AtlasFormat format, int maxWidth, int maxHeight) {
+        this(format, maxWidth, maxHeight, 0);
+    }
+
+    public TextureAtlas(AtlasFormat format, int maxWidth, int maxHeight, int padding) {
         this.format = Objects.requireNonNull(format, "format");
         if (maxWidth <= 0) {
             throw new IllegalArgumentException("maxWidth must be > 0");
@@ -35,9 +41,13 @@ public final class TextureAtlas {
         if (maxHeight <= 0) {
             throw new IllegalArgumentException("maxHeight must be > 0");
         }
+        if (padding < 0) {
+            throw new IllegalArgumentException("padding must be >= 0");
+        }
 
         this.maxWidth = maxWidth;
         this.maxHeight = maxHeight;
+        this.padding = padding;
         this.bytesPerPixel = format.bytesPerPixel();
         this.rowStrideBytes = multiplyExact(maxWidth, bytesPerPixel, "maxWidth * bytesPerPixel");
         this.pixels = new byte[toIntExact((long) rowStrideBytes * maxHeight, "atlas pixel buffer is too large")];
@@ -63,6 +73,10 @@ public final class TextureAtlas {
         return maxHeight;
     }
 
+    public int padding() {
+        return padding;
+    }
+
     public byte[] pixels() {
         return pixels;
     }
@@ -84,9 +98,23 @@ public final class TextureAtlas {
             return EMPTY_DIRTY_REGIONS;
         }
         DirtyRegion[] regions = new DirtyRegion[freeRects.size()];
+        int count = 0;
         for (int i = 0; i < freeRects.size(); i++) {
             FreeRect freeRect = freeRects.get(i);
-            regions[i] = new DirtyRegion(freeRect.x, freeRect.y, freeRect.width, freeRect.height);
+            if (freeRect.y >= currentHeight) {
+                continue;
+            }
+            int clippedHeight = Math.min(freeRect.bottom(), currentHeight) - freeRect.y;
+            if (clippedHeight <= 0) {
+                continue;
+            }
+            regions[count++] = new DirtyRegion(freeRect.x, freeRect.y, freeRect.width, clippedHeight);
+        }
+        if (count == 0) {
+            return EMPTY_DIRTY_REGIONS;
+        }
+        if (count != regions.length) {
+            regions = Arrays.copyOf(regions, count);
         }
         return regions;
     }
@@ -131,20 +159,23 @@ public final class TextureAtlas {
         int removedY = ownedTexture.y();
         int removedWidth = ownedTexture.width();
         int removedHeight = ownedTexture.height();
+        int removedSlotWidth = slotWidth(removedWidth);
+        int removedSlotHeight = slotHeight(removedHeight);
         int previousHeight = currentHeight;
 
-        clearRegion(removedX, removedY, removedWidth, removedHeight);
+        clearRect(removedX, removedY, removedSlotWidth, removedSlotHeight);
         ownedTexture.invalidate();
 
         if (textures.isEmpty()) {
             contentBottom = 0;
+            layoutBottom = 0;
             currentHeight = 1;
             freeRects.clear();
         } else {
             contentBottom = recomputeContentBottom();
+            layoutBottom = recomputeLayoutBottom();
             currentHeight = atlasHeightForContent(contentBottom);
-            trimFreeRectsToCurrentHeight();
-            addFreeRect(removedX, removedY, removedWidth, removedHeight);
+            addFreeRect(removedX, removedY, removedSlotWidth, removedSlotHeight);
         }
         resetAppendState();
 
@@ -152,7 +183,7 @@ public final class TextureAtlas {
             clearRows(currentHeight, previousHeight - currentHeight);
             markWholeAtlasDirty();
         } else {
-            dirtyTracker.mark(removedX, removedY, removedWidth, removedHeight);
+            markDirtyClamped(removedX, removedY, removedSlotWidth, removedSlotHeight);
         }
         return true;
     }
@@ -186,28 +217,32 @@ public final class TextureAtlas {
     }
 
     private AppendPlacement tryAppend(int width, int height) {
+        int paddedWidth = slotWidth(width);
+        int paddedHeight = slotHeight(height);
         int candidateX = appendX;
         int candidateY = appendY;
         int candidateRowHeight = appendRowHeight;
 
-        if (candidateX + width > maxWidth) {
+        if (candidateX + paddedWidth > maxWidth) {
             candidateX = 0;
             candidateY += candidateRowHeight;
             candidateRowHeight = 0;
         }
 
-        int bottom = candidateY + height;
-        if (bottom > maxHeight) {
+        int paddedBottom = candidateY + paddedHeight;
+        if (paddedBottom > maxHeight) {
             return null;
         }
 
-        int newContentBottom = Math.max(contentBottom, bottom);
+        int newContentBottom = Math.max(contentBottom, candidateY + height);
         int newHeight = atlasHeightForContent(newContentBottom);
 
-        return new AppendPlacement(candidateX, candidateY, Math.max(candidateRowHeight, height), newHeight);
+        return new AppendPlacement(candidateX, candidateY, Math.max(candidateRowHeight, paddedHeight), newHeight);
     }
 
     private FreePlacement tryPlaceIntoFreeRect(int width, int height) {
+        int paddedWidth = slotWidth(width);
+        int paddedHeight = slotHeight(height);
         int bestIndex = -1;
         int bestWaste = Integer.MAX_VALUE;
         int bestShortSideWaste = Integer.MAX_VALUE;
@@ -216,12 +251,12 @@ public final class TextureAtlas {
 
         for (int i = 0; i < freeRects.size(); i++) {
             FreeRect freeRect = freeRects.get(i);
-            if (width > freeRect.width || height > freeRect.height) {
+            if (paddedWidth > freeRect.width || paddedHeight > freeRect.height) {
                 continue;
             }
 
-            int waste = freeRect.width * freeRect.height - width * height;
-            int shortSideWaste = Math.min(freeRect.width - width, freeRect.height - height);
+            int waste = freeRect.width * freeRect.height - paddedWidth * paddedHeight;
+            int shortSideWaste = Math.min(freeRect.width - paddedWidth, freeRect.height - paddedHeight);
             if (waste < bestWaste
                 || (waste == bestWaste && shortSideWaste < bestShortSideWaste)
                 || (waste == bestWaste && shortSideWaste == bestShortSideWaste
@@ -240,16 +275,32 @@ public final class TextureAtlas {
 
         FreeRect freeRect = freeRects.remove(bestIndex);
         // Split the consumed free rect into non-overlapping right and bottom leftovers.
-        addFreeRect(freeRect.x + width, freeRect.y, freeRect.width - width, freeRect.height);
-        addFreeRect(freeRect.x, freeRect.y + height, width, freeRect.height - height);
+        addFreeRect(freeRect.x + paddedWidth, freeRect.y, freeRect.width - paddedWidth, freeRect.height);
+        addFreeRect(freeRect.x, freeRect.y + paddedHeight, paddedWidth, freeRect.height - paddedHeight);
         return new FreePlacement(freeRect.x, freeRect.y);
     }
 
     private void applyFreeRectAdd(AtlasTexture texture, byte[] bytes, int x, int y, int width, int height) {
+        int previousHeight = currentHeight;
+        int newContentBottom = Math.max(contentBottom, y + height);
+        int newHeight = atlasHeightForContent(newContentBottom);
+        if (newHeight > previousHeight) {
+            clearRows(previousHeight, newHeight - previousHeight);
+        }
+
+        clearRect(x, y, slotWidth(width), slotHeight(height));
         copyIntoAtlas(bytes, x, y, width, height);
         texture.setRegion(x, y, width, height);
         textures.add(texture);
-        dirtyTracker.mark(x, y, width, height);
+        contentBottom = newContentBottom;
+        layoutBottom = Math.max(layoutBottom, y + slotHeight(height));
+        currentHeight = newHeight;
+
+        if (currentHeight != previousHeight) {
+            markWholeAtlasDirty();
+        } else {
+            markDirtyClamped(x, y, width, height);
+        }
     }
 
     private void applyAppendAdd(AtlasTexture texture,
@@ -265,20 +316,22 @@ public final class TextureAtlas {
             clearRows(previousHeight, newHeight - previousHeight);
         }
 
+        clearRect(x, y, slotWidth(width), slotHeight(height));
         copyIntoAtlas(bytes, x, y, width, height);
 
         texture.setRegion(x, y, width, height);
         textures.add(texture);
         contentBottom = Math.max(contentBottom, y + height);
+        layoutBottom = Math.max(layoutBottom, y + slotHeight(height));
         currentHeight = newHeight;
-        appendX = x + width;
+        appendX = x + slotWidth(width);
         appendY = y;
         appendRowHeight = newRowHeight;
 
         if (currentHeight != previousHeight) {
             markWholeAtlasDirty();
         } else {
-            dirtyTracker.mark(x, y, width, height);
+            markDirtyClamped(x, y, width, height);
         }
     }
 
@@ -306,19 +359,19 @@ public final class TextureAtlas {
             handles[index] = texture;
             ids[index] = index;
             if (texture == specialTexture && specialAlreadyActive) {
-                widths[index] = specialWidth;
-                heights[index] = specialHeight;
+                widths[index] = slotWidth(specialWidth);
+                heights[index] = slotHeight(specialHeight);
             } else {
-                widths[index] = texture.width();
-                heights[index] = texture.height();
+                widths[index] = slotWidth(texture.width());
+                heights[index] = slotHeight(texture.height());
             }
             index++;
         }
         if (specialTexture != null && !specialAlreadyActive) {
             handles[index] = specialTexture;
             ids[index] = index;
-            widths[index] = specialWidth;
-            heights[index] = specialHeight;
+            widths[index] = slotWidth(specialWidth);
+            heights[index] = slotHeight(specialHeight);
         }
 
         rectPack.initTarget(maxWidth, maxHeight, maxWidth);
@@ -328,16 +381,20 @@ public final class TextureAtlas {
         }
 
         int usedBottom = 0;
+        int usedLayoutBottom = 0;
         for (int i = 0; i < count; i++) {
-            usedBottom = Math.max(usedBottom, outY[i] + heights[i]);
+            AtlasTexture texture = handles[i];
+            int actualHeight = texture == specialTexture ? specialHeight : texture.height();
+            usedBottom = Math.max(usedBottom, outY[i] + actualHeight);
+            usedLayoutBottom = Math.max(usedLayoutBottom, outY[i] + heights[i]);
         }
-        if (usedBottom > maxHeight) {
+        if (usedLayoutBottom > maxHeight) {
             return false;
         }
         int newHeight = atlasHeightForContent(usedBottom);
 
         applyPackedLayout(handles, widths, heights, outX, outY, count, specialTexture, specialBytes,
-            specialAlreadyActive, usedBottom, newHeight);
+            specialWidth, specialHeight, specialAlreadyActive, usedBottom, usedLayoutBottom, newHeight);
         return true;
     }
 
@@ -349,8 +406,11 @@ public final class TextureAtlas {
                                    int count,
                                    AtlasTexture specialTexture,
                                    byte[] specialBytes,
+                                   int specialWidth,
+                                   int specialHeight,
                                    boolean specialAlreadyActive,
                                    int usedBottom,
+                                   int usedLayoutBottom,
                                    int newHeight) {
         int previousHeight = currentHeight;
         int previousBytes = rowsToBytes(previousHeight);
@@ -366,16 +426,16 @@ public final class TextureAtlas {
             AtlasTexture texture = handles[i];
             int newX = outX[i];
             int newY = outY[i];
-            int newWidth = widths[i];
-            int newHeightValue = heights[i];
+            int actualWidth = texture == specialTexture ? specialWidth : texture.width();
+            int actualHeight = texture == specialTexture ? specialHeight : texture.height();
 
             if (texture == specialTexture) {
-                copyIntoAtlas(specialBytes, newX, newY, newWidth, newHeightValue);
+                copyIntoAtlas(specialBytes, newX, newY, actualWidth, actualHeight);
             } else {
-                copyRegion(repackScratch, texture.x(), texture.y(), texture.width(), texture.height(), pixels, newX, newY);
+                copyRegion(repackScratch, texture.x(), texture.y(), actualWidth, actualHeight, pixels, newX, newY);
             }
 
-            texture.setRegion(newX, newY, newWidth, newHeightValue);
+            texture.setRegion(newX, newY, actualWidth, actualHeight);
         }
 
         if (specialTexture != null && !specialAlreadyActive) {
@@ -383,6 +443,7 @@ public final class TextureAtlas {
         }
 
         contentBottom = usedBottom;
+        layoutBottom = usedLayoutBottom;
         currentHeight = newHeight;
         freeRects.clear();
         resetAppendState();
@@ -414,7 +475,7 @@ public final class TextureAtlas {
         }
     }
 
-    private void clearRegion(int x, int y, int width, int height) {
+    private void clearRect(int x, int y, int width, int height) {
         int rowBytes = multiplyExact(width, bytesPerPixel, "texture row is too large");
         for (int row = 0; row < height; row++) {
             int offset = pixelOffset(x, y + row);
@@ -437,40 +498,38 @@ public final class TextureAtlas {
         return bottom;
     }
 
+    private int recomputeLayoutBottom() {
+        int bottom = 0;
+        for (AtlasTexture texture : textures) {
+            bottom = Math.max(bottom, texture.y() + slotHeight(texture.height()));
+        }
+        return bottom;
+    }
+
     private void markWholeAtlasDirty() {
         dirtyTracker.mark(0, 0, maxWidth, currentHeight);
     }
 
-    private void trimFreeRectsToCurrentHeight() {
-        for (int i = freeRects.size() - 1; i >= 0; i--) {
-            FreeRect freeRect = freeRects.get(i);
-            if (freeRect.y >= currentHeight) {
-                freeRects.remove(i);
-                continue;
-            }
-            int clippedHeight = Math.min(freeRect.bottom(), currentHeight) - freeRect.y;
-            if (clippedHeight <= 0) {
-                freeRects.remove(i);
-            } else {
-                freeRect.height = clippedHeight;
-            }
+    private void markDirtyClamped(int x, int y, int width, int height) {
+        if (y >= currentHeight) {
+            return;
         }
+        int clippedHeight = Math.min(y + height, currentHeight) - y;
+        if (clippedHeight <= 0) {
+            return;
+        }
+        dirtyTracker.mark(x, y, width, clippedHeight);
     }
 
     private void addFreeRect(int x, int y, int width, int height) {
         if (width <= 0 || height <= 0 || x < 0 || y < 0 || x + width > maxWidth) {
             return;
         }
-        if (y >= currentHeight) {
+        if (y >= maxHeight || y + height > maxHeight) {
             return;
         }
 
-        int clippedHeight = Math.min(y + height, currentHeight) - y;
-        if (clippedHeight <= 0) {
-            return;
-        }
-
-        FreeRect mergedRect = new FreeRect(x, y, width, clippedHeight);
+        FreeRect mergedRect = new FreeRect(x, y, width, height);
         int index = 0;
         while (index < freeRects.size()) {
             FreeRect existing = freeRects.get(index);
@@ -520,7 +579,7 @@ public final class TextureAtlas {
 
     private void resetAppendState() {
         appendX = 0;
-        appendY = contentBottom;
+        appendY = layoutBottom;
         appendRowHeight = 0;
     }
 
@@ -562,6 +621,14 @@ public final class TextureAtlas {
             return 1;
         }
         return Math.min(PowerOfTwo.ceil(contentBottom), maxHeight);
+    }
+
+    private int slotWidth(int width) {
+        return toIntExact((long) width + padding, "padded width is too large");
+    }
+
+    private int slotHeight(int height) {
+        return toIntExact((long) height + padding, "padded height is too large");
     }
 
     private void ensureScratchCapacity(int requiredBytes) {

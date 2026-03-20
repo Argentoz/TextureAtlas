@@ -93,13 +93,14 @@ public final class AtlasDemoApp {
     private static final int WINDOW_HEIGHT = 960;
     private static final int ATLAS_MAX_WIDTH = 2048;
     private static final int ATLAS_MAX_HEIGHT = 4096;
+    private static final int ATLAS_PADDING = 2;
     private static final float PADDING = 18.0f;
     private static final float TOOLBAR_HEIGHT = 84.0f;
     private static final float BUTTON_WIDTH = 148.0f;
     private static final float BUTTON_HEIGHT = 36.0f;
     private static final float BUTTON_GAP = 12.0f;
     private static final String UI_FONT_NAME = "ui";
-    private final TextureAtlas atlas = new TextureAtlas(AtlasFormat.RGBA8, ATLAS_MAX_WIDTH, ATLAS_MAX_HEIGHT);
+    private final TextureAtlas atlas = new TextureAtlas(AtlasFormat.RGBA8, ATLAS_MAX_WIDTH, ATLAS_MAX_HEIGHT, ATLAS_PADDING);
     private final List<TextureEntry> entries = new ArrayList<>();
 
     private long window;

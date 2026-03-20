@@ -2,13 +2,18 @@ package ru.argentoz;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Random;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TextureAtlasTest {
@@ -78,7 +83,7 @@ class TextureAtlasTest {
     }
 
     @Test
-    void addReusesDeletedSpaceAndTracksLeftoverFreeArea() {
+    void smallDeletedSpaceIsIgnoredAsFreeRect() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
 
         AtlasTexture t1 = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
@@ -88,34 +93,19 @@ class TextureAtlasTest {
 
         assertTrue(atlas.removeTexture(t2));
         assertArrayEquals(new DirtyRegion[]{new DirtyRegion(4, 0, 4, 4)}, atlas.consumeDirtyRegions());
+        assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
 
         AtlasTexture t4 = atlas.addTexture(alphaBytes(2, 4, 4), 2, 4);
-        assertEquals(4, t4.x());
-        assertEquals(0, t4.y());
-        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(4, 0, 2, 4)}, atlas.consumeDirtyRegions());
-
-        AtlasTexture t5 = atlas.addTexture(alphaBytes(2, 4, 5), 2, 4);
-
         assertTrue(t4.isAlive());
-        assertTrue(t5.isAlive());
         assertEquals(8, atlas.height());
-        assertEquals(6, t5.x());
-        assertEquals(0, t5.y());
-        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(6, 0, 2, 4)}, atlas.consumeDirtyRegions());
-
-        Set<String> occupiedCells = new HashSet<>();
-        occupiedCells.add(t1.x() + "," + t1.y());
-        occupiedCells.add(t3.x() + "," + t3.y());
-        occupiedCells.add(t4.x() + "," + t4.y());
-        occupiedCells.add(t5.x() + "," + t5.y());
-        assertEquals(Set.of("0,0", "4,0", "6,0", "0,4"), occupiedCells);
-
+        assertLiveTextureSlotsDoNotOverlap(new ArrayList<>(List.of(t1, t3, t4)),
+            atlas.padding(), 0, 0, new StringBuilder("small free-rects are dropped"));
         assertFalse(t2.isAlive());
-        assertTexturePixels(atlas, t5, alphaBytes(2, 4, 5));
+        assertTexturePixels(atlas, t4, alphaBytes(2, 4, 4));
     }
 
     @Test
-    void splitFreeSpaceStoresRightAndBottomRemainders() {
+    void splitFreeSpaceDropsRemaindersBelowThreshold() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
 
         AtlasTexture left = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
@@ -124,25 +114,97 @@ class TextureAtlasTest {
 
         assertTrue(atlas.removeTexture(left));
         atlas.consumeDirtyRegions();
+        assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
 
         AtlasTexture small = atlas.addTexture(alphaBytes(2, 2, 3), 2, 2);
         assertEquals(0, small.x());
-        assertEquals(0, small.y());
-        atlas.consumeDirtyRegions();
-
-        AtlasTexture rightRemainder = atlas.addTexture(alphaBytes(2, 4, 4), 2, 4);
-        assertEquals(2, rightRemainder.x());
-        assertEquals(0, rightRemainder.y());
-        atlas.consumeDirtyRegions();
-
-        AtlasTexture bottomRemainder = atlas.addTexture(alphaBytes(2, 2, 5), 2, 2);
-        assertEquals(0, bottomRemainder.x());
-        assertEquals(2, bottomRemainder.y());
-        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 2, 2, 2)}, atlas.consumeDirtyRegions());
+        assertEquals(4, small.y());
+        assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
 
         assertTexturePixels(atlas, small, alphaBytes(2, 2, 3));
-        assertTexturePixels(atlas, rightRemainder, alphaBytes(2, 4, 4));
-        assertTexturePixels(atlas, bottomRemainder, alphaBytes(2, 2, 5));
+    }
+
+    @Test
+    void resizeSmallerDropsLeftoversBelowFreeRectThreshold() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
+
+        AtlasTexture texture = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
+        atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture sameHandle = atlas.updateTexture(texture, alphaBytes(2, 2, 3), 2, 2);
+
+        assertSame(texture, sameHandle);
+        assertEquals(0, texture.x());
+        assertEquals(0, texture.y());
+        assertEquals(2, texture.width());
+        assertEquals(2, texture.height());
+        assertEquals(4, atlas.height());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 4, 4)}, atlas.consumeDirtyRegions());
+        assertTexturePixels(atlas, texture, alphaBytes(2, 2, 3));
+        assertGapIsZero(atlas, 2, 0, 2, 4);
+        assertGapIsZero(atlas, 0, 2, 2, 2);
+        assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
+    }
+
+    @Test
+    void resizeLargerFallsBackToRepackWhenOnlySmallHoleExists() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
+
+        AtlasTexture texture = atlas.addTexture(alphaBytes(2, 2, 1), 2, 2);
+        AtlasTexture neighbour = atlas.addTexture(alphaBytes(2, 2, 2), 2, 2);
+        AtlasTexture hole = atlas.addTexture(alphaBytes(4, 4, 3), 4, 4);
+        atlas.addTexture(alphaBytes(4, 4, 4), 4, 4);
+        atlas.consumeDirtyRegions();
+
+        assertTrue(atlas.removeTexture(hole));
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture sameHandle = atlas.updateTexture(texture, alphaBytes(4, 4, 5), 4, 4);
+
+        assertSame(texture, sameHandle);
+        assertEquals(8, atlas.height());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 8, 8)}, atlas.consumeDirtyRegions());
+        assertTexturePixels(atlas, texture, alphaBytes(4, 4, 5));
+        assertLiveTextureSlotsDoNotOverlap(new ArrayList<>(List.of(texture, neighbour)),
+            atlas.padding(), 0, 0, new StringBuilder("small holes should not be reused"));
+    }
+
+    @Test
+    void growUpdateThatAppendsOverOldSlotRemovesOverlappingFreeRect() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8, 1);
+
+        AtlasTexture texture = atlas.addTexture(alphaBytes(2, 3, 1), 2, 3);
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture sameHandle = atlas.updateTexture(texture, alphaBytes(4, 3, 2), 4, 3);
+
+        assertSame(texture, sameHandle);
+        assertEquals(0, texture.x());
+        assertEquals(0, texture.y());
+        assertEquals(4, texture.width());
+        assertEquals(3, texture.height());
+        assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
+    }
+
+    @Test
+    void freeRectPlacementResetsAppendCursorBeforeNextAppend() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8, 1);
+
+        AtlasTexture left = atlas.addTexture(alphaBytes(2, 4, 1), 2, 4);
+        AtlasTexture topRight = atlas.addTexture(alphaBytes(4, 3, 2), 4, 3);
+        AtlasTexture bottomRight = atlas.addTexture(alphaBytes(2, 3, 3), 2, 3);
+
+        assertTrue(atlas.removeTexture(topRight));
+        AtlasTexture moved = atlas.updateTexture(bottomRight, alphaBytes(3, 2, 4), 3, 2);
+        AtlasTexture refilled = atlas.addTexture(alphaBytes(2, 3, 5), 2, 3);
+
+        assertSame(bottomRight, moved);
+        assertTrue(left.isAlive());
+        assertTrue(refilled.isAlive());
+        assertLiveTextureSlotsDoNotOverlap(new ArrayList<>(List.of(left, moved, refilled)),
+            atlas.padding(), 0, 0, new StringBuilder("deterministic append-cursor regression"));
+        assertThrows(IllegalStateException.class, () -> atlas.addTexture(alphaBytes(4, 3, 6), 4, 3));
     }
 
     @Test
@@ -220,6 +282,56 @@ class TextureAtlasTest {
         assertTexturePixels(atlas, extra, alphaBytes(1, 1, 2));
     }
 
+    @Test
+    void randomMutationsNeverExposeOccupiedSpaceAsFreeRegion() {
+        for (int seed = 0; seed < 200; seed++) {
+            TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8, 1);
+            Random random = new Random(seed);
+            ArrayList<AtlasTexture> textures = new ArrayList<>();
+            int nextValue = 1;
+            StringBuilder history = new StringBuilder();
+
+            for (int step = 0; step < 200; step++) {
+                int action = textures.isEmpty() ? 0 : random.nextInt(3);
+                if (action == 0) {
+                    int width = 1 + random.nextInt(4);
+                    int height = 1 + random.nextInt(4);
+                    history.append(step).append(": add ").append(width).append('x').append(height);
+                    try {
+                        textures.add(atlas.addTexture(alphaBytes(width, height, nextValue++), width, height));
+                        history.append(" ok");
+                    } catch (IllegalStateException ignored) {
+                        // Full atlas is acceptable here, we only care about free-space integrity.
+                        history.append(" fail");
+                    }
+                } else if (action == 1) {
+                    AtlasTexture texture = textures.get(random.nextInt(textures.size()));
+                    int width = 1 + random.nextInt(4);
+                    int height = 1 + random.nextInt(4);
+                    history.append(step).append(": update #").append(textures.indexOf(texture))
+                        .append(" -> ").append(width).append('x').append(height);
+                    try {
+                        atlas.updateTexture(texture, alphaBytes(width, height, nextValue++), width, height);
+                        history.append(" ok");
+                    } catch (IllegalStateException ignored) {
+                        // Oversized update is acceptable here, the atlas state must remain valid.
+                        history.append(" fail");
+                    }
+                } else {
+                    int index = random.nextInt(textures.size());
+                    AtlasTexture texture = textures.remove(index);
+                    atlas.removeTexture(texture);
+                    history.append(step).append(": remove #").append(index);
+                }
+
+                history.append(" | state=").append(formatState(atlas, textures)).append('\n');
+
+                assertLiveTextureSlotsDoNotOverlap(textures, atlas.padding(), seed, step, history);
+                assertFreeRegionsDoNotOverlapLiveTextureSlots(atlas, textures, seed, step, history);
+            }
+        }
+    }
+
     private static byte[] alphaBytes(int width, int height, int value) {
         byte[] bytes = new byte[width * height];
         for (int i = 0; i < bytes.length; i++) {
@@ -265,6 +377,115 @@ class TextureAtlasTest {
                     assertEquals(0, atlas.pixels()[offset + channel],
                         "gap pixel at (" + (x + column) + ", " + (y + row) + ") must be zero");
                 }
+            }
+        }
+    }
+
+    private static void assertFreeRegionsDoNotOverlapLiveTextureSlots(TextureAtlas atlas,
+                                                                      ArrayList<AtlasTexture> textures,
+                                                                      int seed,
+                                                                      int step,
+                                                                      StringBuilder history) {
+        List<DirtyRegion> freeRegions = internalFreeRegions(atlas);
+        int padding = atlas.padding();
+
+        for (DirtyRegion freeRegion : freeRegions) {
+            for (AtlasTexture texture : textures) {
+                if (!texture.isAlive()) {
+                    continue;
+                }
+
+                int occupiedX = texture.x();
+                int occupiedY = texture.y();
+                int occupiedRight = occupiedX + texture.width() + padding;
+                int occupiedBottom = occupiedY + texture.height() + padding;
+
+                boolean overlaps = freeRegion.x() < occupiedRight
+                    && freeRegion.x() + freeRegion.width() > occupiedX
+                    && freeRegion.y() < occupiedBottom
+                    && freeRegion.y() + freeRegion.height() > occupiedY;
+                assertFalse(overlaps, () -> "free region " + freeRegion + " overlaps texture slot at seed="
+                    + seed + ", step=" + step + ", texture=(" + texture.x() + "," + texture.y() + ","
+                    + texture.width() + "x" + texture.height() + "), atlasHeight=" + atlas.height()
+                    + "\nHistory:\n" + history);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<DirtyRegion> internalFreeRegions(TextureAtlas atlas) {
+        try {
+            Field freeRectsField = TextureAtlas.class.getDeclaredField("freeRects");
+            freeRectsField.setAccessible(true);
+
+            ArrayList<?> freeRects = (ArrayList<?>) freeRectsField.get(atlas);
+            ArrayList<DirtyRegion> regions = new ArrayList<>(freeRects.size());
+            for (Object freeRect : freeRects) {
+                Class<?> type = freeRect.getClass();
+                int x = readIntField(type, freeRect, "x");
+                int y = readIntField(type, freeRect, "y");
+                int width = readIntField(type, freeRect, "width");
+                int height = readIntField(type, freeRect, "height");
+                regions.add(new DirtyRegion(x, y, width, height));
+            }
+            return regions;
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError("Unable to inspect internal free rects", e);
+        }
+    }
+
+    private static int readIntField(Class<?> type, Object instance, String name) throws ReflectiveOperationException {
+        Field field = type.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.getInt(instance);
+    }
+
+    private static String formatState(TextureAtlas atlas, ArrayList<AtlasTexture> textures) {
+        StringBuilder state = new StringBuilder();
+        state.append("h=").append(atlas.height()).append(", textures=[");
+        for (int i = 0; i < textures.size(); i++) {
+            if (i > 0) {
+                state.append("; ");
+            }
+            AtlasTexture texture = textures.get(i);
+            state.append(i).append(':')
+                .append(texture.x()).append(',').append(texture.y())
+                .append(',').append(texture.width()).append('x').append(texture.height())
+                .append(",alive=").append(texture.isAlive());
+        }
+        state.append("], free=").append(internalFreeRegions(atlas));
+        return state.toString();
+    }
+
+    private static void assertLiveTextureSlotsDoNotOverlap(ArrayList<AtlasTexture> textures,
+                                                           int padding,
+                                                           int seed,
+                                                           int step,
+                                                           StringBuilder history) {
+        for (int i = 0; i < textures.size(); i++) {
+            AtlasTexture first = textures.get(i);
+            if (!first.isAlive()) {
+                continue;
+            }
+            int firstRight = first.x() + first.width() + padding;
+            int firstBottom = first.y() + first.height() + padding;
+
+            for (int j = i + 1; j < textures.size(); j++) {
+                AtlasTexture second = textures.get(j);
+                if (!second.isAlive()) {
+                    continue;
+                }
+                int secondRight = second.x() + second.width() + padding;
+                int secondBottom = second.y() + second.height() + padding;
+
+                boolean overlaps = first.x() < secondRight
+                    && firstRight > second.x()
+                    && first.y() < secondBottom
+                    && firstBottom > second.y();
+                assertFalse(overlaps, () -> "texture slots overlap at seed=" + seed + ", step=" + step
+                    + ": first=(" + first.x() + "," + first.y() + "," + first.width() + "x" + first.height()
+                    + "), second=(" + second.x() + "," + second.y() + "," + second.width() + "x" + second.height()
+                    + ")\nHistory:\n" + history);
             }
         }
     }

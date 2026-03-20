@@ -19,6 +19,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TextureAtlasTest {
 
     @Test
+    void customMinHeightIsUsedForEmptyAndSmallContent() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 16, 0, 4);
+
+        assertEquals(4, atlas.height());
+
+        AtlasTexture texture = atlas.addTexture(alphaBytes(2, 2, 1), 2, 2);
+
+        assertEquals(4, atlas.height());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 2, 2)}, atlas.consumeDirtyRegions());
+        assertTrue(atlas.removeTexture(texture));
+        assertEquals(4, atlas.height());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 2, 2)}, atlas.consumeDirtyRegions());
+    }
+
+    @Test
     void sameSizeUpdateRemoveAndDirtyTrackingWork() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.RGBA8, 8, 16);
 
@@ -75,9 +90,8 @@ class TextureAtlasTest {
         AtlasTexture second = atlas.addTexture(alphaBytes(1, 1, 2), 1, 1);
 
         assertEquals(0, first.x());
-        assertEquals(0, first.y());
         assertEquals(0, second.x());
-        assertEquals(3, second.y());
+        assertEquals(Set.of(0, 3), Set.of(first.y(), second.y()));
         assertEquals(4, atlas.height());
         assertGapIsZero(atlas, 0, 1, 1, 2);
     }
@@ -92,7 +106,7 @@ class TextureAtlasTest {
         atlas.consumeDirtyRegions();
 
         assertTrue(atlas.removeTexture(t2));
-        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(4, 0, 4, 4)}, atlas.consumeDirtyRegions());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 8, 4)}, atlas.consumeDirtyRegions());
         assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
 
         AtlasTexture t4 = atlas.addTexture(alphaBytes(2, 4, 4), 2, 4);
@@ -117,15 +131,15 @@ class TextureAtlasTest {
         assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
 
         AtlasTexture small = atlas.addTexture(alphaBytes(2, 2, 3), 2, 2);
-        assertEquals(0, small.x());
-        assertEquals(4, small.y());
+        assertEquals(4, small.x());
+        assertEquals(0, small.y());
         assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
 
         assertTexturePixels(atlas, small, alphaBytes(2, 2, 3));
     }
 
     @Test
-    void repeatedFragmentationTriggersAutomaticRepack() {
+    void overflowDrivenRepackMayCompactEarlierLayoutBeforeLaterShrink() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 4, 8);
 
         AtlasTexture top = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
@@ -133,7 +147,8 @@ class TextureAtlasTest {
         atlas.consumeDirtyRegions();
 
         assertTrue(atlas.removeTexture(top));
-        assertEquals(8, atlas.height());
+        assertEquals(4, atlas.height());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 4, 4)}, atlas.consumeDirtyRegions());
         atlas.consumeDirtyRegions();
 
         AtlasTexture sameHandle = atlas.updateTexture(bottom, alphaBytes(4, 3, 3), 4, 3);
@@ -234,6 +249,36 @@ class TextureAtlasTest {
     @Test
     void addFallsBackToRepackWhenNoSingleHoleFits() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
+
+        AtlasTexture t1 = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
+        AtlasTexture t2 = atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);
+        AtlasTexture t3 = atlas.addTexture(alphaBytes(4, 4, 3), 4, 4);
+        AtlasTexture t4 = atlas.addTexture(alphaBytes(4, 4, 4), 4, 4);
+        atlas.consumeDirtyRegions();
+
+        assertTrue(atlas.removeTexture(t1));
+        assertTrue(atlas.removeTexture(t4));
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture wide = atlas.addTexture(alphaBytes(8, 4, 9), 8, 4);
+
+        assertTrue(wide.isAlive());
+        assertEquals(8, atlas.height());
+        assertEquals(0, wide.x());
+        assertEquals(0, wide.y());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 8, 8)}, atlas.consumeDirtyRegions());
+
+        Set<String> occupiedCells = new HashSet<>();
+        occupiedCells.add(wide.x() + "," + wide.y());
+        occupiedCells.add(t2.x() + "," + t2.y());
+        occupiedCells.add(t3.x() + "," + t3.y());
+        assertEquals(Set.of("0,0", "0,4", "4,4"), occupiedCells);
+        assertTexturePixels(atlas, wide, alphaBytes(8, 4, 9));
+    }
+
+    @Test
+    void overflowingAppendRepackagesCurrentHeightBeforeGrowing() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 16);
 
         AtlasTexture t1 = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
         AtlasTexture t2 = atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);

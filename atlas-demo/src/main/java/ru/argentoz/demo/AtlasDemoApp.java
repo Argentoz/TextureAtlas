@@ -100,7 +100,7 @@ public final class AtlasDemoApp {
     private static final float BUTTON_HEIGHT = 36.0f;
     private static final float BUTTON_GAP = 12.0f;
     private static final String UI_FONT_NAME = "ui";
-    private final TextureAtlas atlas = new TextureAtlas(AtlasFormat.RGBA8, ATLAS_MAX_WIDTH, ATLAS_MAX_HEIGHT, ATLAS_PADDING);
+    private final TextureAtlas atlas = new TextureAtlas(AtlasFormat.RGBA8, ATLAS_MAX_WIDTH, ATLAS_MAX_HEIGHT, ATLAS_PADDING, 256);
     private final List<TextureEntry> entries = new ArrayList<>();
 
     private long window;

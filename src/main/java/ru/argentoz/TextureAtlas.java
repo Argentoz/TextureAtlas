@@ -8,14 +8,13 @@ public final class TextureAtlas {
 
     private static final int DEFAULT_DIRTY_CAPACITY = 16;
     private static final int MIN_FREE_RECT_DIMENSION = 8;
-    private static final int AUTO_REPACK_WASTE_PERCENT = 35;
-    private static final int AUTO_REPACK_MUTATION_THRESHOLD = 2;
     private static final DirtyRegion[] EMPTY_DIRTY_REGIONS = new DirtyRegion[0];
 
     private final AtlasFormat format;
     private final int maxWidth;
     private final int maxHeight;
     private final int padding;
+    private final int minHeight;
     private final int bytesPerPixel;
     private final int rowStrideBytes;
     private final byte[] pixels;
@@ -25,19 +24,22 @@ public final class TextureAtlas {
     private final DirtyTracker dirtyTracker = new DirtyTracker(DEFAULT_DIRTY_CAPACITY);
 
     private byte[] repackScratch;
-    private int currentHeight = 1;
+    private int currentHeight;
     private int contentBottom;
     private int layoutBottom;
     private int appendX;
     private int appendY;
     private int appendRowHeight;
-    private int autoRepackCandidates;
 
     public TextureAtlas(AtlasFormat format, int maxWidth, int maxHeight) {
-        this(format, maxWidth, maxHeight, 0);
+        this(format, maxWidth, maxHeight, 0, 1);
     }
 
     public TextureAtlas(AtlasFormat format, int maxWidth, int maxHeight, int padding) {
+        this(format, maxWidth, maxHeight, padding, 1);
+    }
+
+    public TextureAtlas(AtlasFormat format, int maxWidth, int maxHeight, int padding, int minHeight) {
         this.format = Objects.requireNonNull(format, "format");
         if (maxWidth <= 0) {
             throw new IllegalArgumentException("maxWidth must be > 0");
@@ -48,13 +50,21 @@ public final class TextureAtlas {
         if (padding < 0) {
             throw new IllegalArgumentException("padding must be >= 0");
         }
+        if (minHeight <= 0) {
+            throw new IllegalArgumentException("minHeight must be > 0");
+        }
+        if (minHeight > maxHeight) {
+            throw new IllegalArgumentException("minHeight must be <= maxHeight");
+        }
 
         this.maxWidth = maxWidth;
         this.maxHeight = maxHeight;
         this.padding = padding;
+        this.minHeight = minHeight;
         this.bytesPerPixel = format.bytesPerPixel();
         this.rowStrideBytes = multiplyExact(maxWidth, bytesPerPixel, "maxWidth * bytesPerPixel");
         this.pixels = new byte[toIntExact((long) rowStrideBytes * maxHeight, "atlas pixel buffer is too large")];
+        this.currentHeight = minHeight;
     }
 
     public AtlasFormat format() {
@@ -167,10 +177,8 @@ public final class TextureAtlas {
             addFreeRect(removedX, removedY, removedSlot.width(), removedSlot.height());
             resetAppendState();
         }
-        if (!maybeAutoRepack()) {
-            finishMutationAfterPossibleShrink(previousHeight, removedX, removedY,
-                removedSlot.width(), removedSlot.height());
-        }
+        finishMutationAfterPossibleShrink(previousHeight, removedX, removedY,
+            removedSlot.width(), removedSlot.height());
         return true;
     }
 
@@ -242,9 +250,7 @@ public final class TextureAtlas {
 
         refreshLayoutState();
         resetAppendState();
-        if (!maybeAutoRepack()) {
-            finishMutationAfterPossibleShrink(previousHeight, x, y, oldSlot.width(), oldSlot.height());
-        }
+        finishMutationAfterPossibleShrink(previousHeight, x, y, oldSlot.width(), oldSlot.height());
     }
 
     private boolean relocateUpdatedTexture(AtlasTexture texture, byte[] bytes, int width, int height) {
@@ -354,7 +360,6 @@ public final class TextureAtlas {
         } else {
             resetAppendState();
         }
-        resetAutoRepackCandidates();
 
         if (newHeight < previousHeight) {
             clearRows(newHeight, previousHeight - newHeight);
@@ -382,6 +387,9 @@ public final class TextureAtlas {
 
         int paddedBottom = candidateY + slot.height();
         if (paddedBottom > maxHeight) {
+            return null;
+        }
+        if (!textures.isEmpty() && candidateY + height > currentHeight) {
             return null;
         }
 
@@ -447,7 +455,6 @@ public final class TextureAtlas {
         layoutBottom = Math.max(layoutBottom, y + slot.height());
         currentHeight = newHeight;
         resetAppendState();
-        resetAutoRepackCandidates();
         finishMutationAfterAnyHeightChange(previousHeight, x, y, width, height);
     }
 
@@ -477,7 +484,6 @@ public final class TextureAtlas {
         appendX = x + slot.width();
         appendY = y;
         appendRowHeight = newRowHeight;
-        resetAutoRepackCandidates();
         finishMutationAfterAnyHeightChange(previousHeight, x, y, width, height);
     }
 
@@ -486,7 +492,8 @@ public final class TextureAtlas {
                                     int specialWidth,
                                     int specialHeight,
                                     boolean specialAlreadyActive) {
-        PackedLayout packedLayout = buildPackedLayout(specialTexture, specialWidth, specialHeight, specialAlreadyActive);
+        PackedLayout packedLayout = buildPackedLayoutWithGrowth(specialTexture, specialWidth,
+            specialHeight, specialAlreadyActive);
         if (packedLayout == null) {
             return false;
         }
@@ -496,10 +503,31 @@ public final class TextureAtlas {
         return true;
     }
 
+    private PackedLayout buildPackedLayoutWithGrowth(AtlasTexture specialTexture,
+                                                     int specialWidth,
+                                                     int specialHeight,
+                                                     boolean specialAlreadyActive) {
+        int targetHeight = currentHeight;
+        while (true) {
+            PackedLayout packedLayout = buildPackedLayout(specialTexture, specialWidth, specialHeight,
+                specialAlreadyActive, targetHeight);
+            if (packedLayout != null) {
+                return packedLayout;
+            }
+
+            int nextHeight = nextPackHeight(targetHeight);
+            if (nextHeight <= targetHeight) {
+                return null;
+            }
+            targetHeight = nextHeight;
+        }
+    }
+
     private PackedLayout buildPackedLayout(AtlasTexture specialTexture,
                                            int specialWidth,
                                            int specialHeight,
-                                           boolean specialAlreadyActive) {
+                                           boolean specialAlreadyActive,
+                                           int targetHeight) {
         int extra = specialTexture != null && !specialAlreadyActive ? 1 : 0;
         int count = textures.size() + extra;
         if (count == 0) {
@@ -534,7 +562,7 @@ public final class TextureAtlas {
             heights[index] = slotHeight(specialHeight);
         }
 
-        rectPack.initTarget(maxWidth, maxHeight, maxWidth);
+        rectPack.initTarget(maxWidth, targetHeight, maxWidth);
         rectPack.setHeuristic(STBRectPack.HEURISTIC_BF);
         if (!rectPack.packRects(ids, widths, heights, outX, outY, packed, count)) {
             return null;
@@ -548,7 +576,7 @@ public final class TextureAtlas {
             usedBottom = Math.max(usedBottom, outY[i] + actualHeight);
             usedLayoutBottom = Math.max(usedLayoutBottom, outY[i] + heights[i]);
         }
-        if (usedLayoutBottom > maxHeight) {
+        if (usedLayoutBottom > targetHeight) {
             return null;
         }
         int newHeight = atlasHeightForContent(usedBottom);
@@ -596,7 +624,6 @@ public final class TextureAtlas {
         currentHeight = packedLayout.newHeight();
         freeRects.clear();
         resetAppendState();
-        resetAutoRepackCandidates();
         markWholeAtlasDirty();
     }
 
@@ -673,10 +700,9 @@ public final class TextureAtlas {
     private void resetAtlasState() {
         contentBottom = 0;
         layoutBottom = 0;
-        currentHeight = 1;
+        currentHeight = minHeight;
         freeRects.clear();
         resetAppendState();
-        resetAutoRepackCandidates();
     }
 
     private AtlasStateSnapshot snapshotState() {
@@ -721,55 +747,13 @@ public final class TextureAtlas {
         markDirtyClamped(dirtyX, dirtyY, dirtyWidth, dirtyHeight);
     }
 
-    private boolean maybeAutoRepack() {
-        if (!isAutoRepackCandidate()) {
-            resetAutoRepackCandidates();
-            return false;
+    private int nextPackHeight(int currentPackHeight) {
+        if (currentPackHeight >= maxHeight) {
+            return currentPackHeight;
         }
 
-        if (autoRepackCandidates < AUTO_REPACK_MUTATION_THRESHOLD) {
-            autoRepackCandidates++;
-        }
-        if (autoRepackCandidates < AUTO_REPACK_MUTATION_THRESHOLD) {
-            return false;
-        }
-
-        PackedLayout packedLayout = buildPackedLayout(null, 0, 0, false);
-        if (packedLayout == null || !wouldAutoRepackImprove(packedLayout)) {
-            resetAutoRepackCandidates();
-            return false;
-        }
-
-        applyPackedLayout(packedLayout, null, null, 0, 0, false);
-        return true;
-    }
-
-    private boolean isAutoRepackCandidate() {
-        if (textures.isEmpty() || layoutBottom <= 0) {
-            return false;
-        }
-
-        long activeArea = (long) layoutBottom * maxWidth;
-        long occupiedArea = occupiedSlotArea();
-        long wastedArea = activeArea - occupiedArea;
-        return wastedArea > 0 && wastedArea * 100 >= activeArea * AUTO_REPACK_WASTE_PERCENT;
-    }
-
-    private boolean wouldAutoRepackImprove(PackedLayout packedLayout) {
-        return packedLayout.usedLayoutBottom() < layoutBottom || packedLayout.newHeight() < currentHeight;
-    }
-
-    private long occupiedSlotArea() {
-        long occupiedArea = 0L;
-        for (AtlasTexture texture : textures) {
-            SlotSize slot = slotSize(texture.width(), texture.height());
-            occupiedArea += (long) slot.width() * slot.height();
-        }
-        return occupiedArea;
-    }
-
-    private void resetAutoRepackCandidates() {
-        autoRepackCandidates = 0;
+        int nextPowerOfTwo = PowerOfTwo.ceil(currentPackHeight + 1);
+        return Math.min(nextPowerOfTwo, maxHeight);
     }
 
     private void markWholeAtlasDirty() {
@@ -916,7 +900,10 @@ public final class TextureAtlas {
 
     private int atlasHeightForContent(int contentBottom) {
         if (contentBottom <= 0) {
-            return 1;
+            return minHeight;
+        }
+        if (contentBottom <= minHeight) {
+            return minHeight;
         }
         return Math.min(PowerOfTwo.ceil(contentBottom), maxHeight);
     }

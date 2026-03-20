@@ -125,6 +125,30 @@ class TextureAtlasTest {
     }
 
     @Test
+    void repeatedFragmentationTriggersAutomaticRepack() {
+        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 4, 8);
+
+        AtlasTexture top = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
+        AtlasTexture bottom = atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);
+        atlas.consumeDirtyRegions();
+
+        assertTrue(atlas.removeTexture(top));
+        assertEquals(8, atlas.height());
+        atlas.consumeDirtyRegions();
+
+        AtlasTexture sameHandle = atlas.updateTexture(bottom, alphaBytes(4, 3, 3), 4, 3);
+
+        assertSame(bottom, sameHandle);
+        assertEquals(4, atlas.height());
+        assertEquals(0, bottom.x());
+        assertEquals(0, bottom.y());
+        assertEquals(4, bottom.width());
+        assertEquals(3, bottom.height());
+        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 4, 4)}, atlas.consumeDirtyRegions());
+        assertTexturePixels(atlas, bottom, alphaBytes(4, 3, 3));
+    }
+
+    @Test
     void resizeSmallerDropsLeftoversBelowFreeRectThreshold() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
 

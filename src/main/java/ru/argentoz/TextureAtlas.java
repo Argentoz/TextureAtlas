@@ -115,10 +115,7 @@ public final class TextureAtlas {
         int count = 0;
         for (int i = 0; i < freeRects.size(); i++) {
             FreeRect freeRect = freeRects.get(i);
-            if (freeRect.y >= currentHeight) {
-                continue;
-            }
-            int clippedHeight = Math.min(freeRect.bottom(), currentHeight) - freeRect.y;
+            int clippedHeight = clipHeightToCurrentAtlas(freeRect.y, freeRect.height);
             if (clippedHeight <= 0) {
                 continue;
             }
@@ -141,7 +138,9 @@ public final class TextureAtlas {
         validateTextureBytes(bytes, width, height);
 
         AtlasTexture texture = new AtlasTexture(this);
-        if (tryAddToFreeRect(texture, bytes, width, height) || tryAddByAppending(texture, bytes, width, height)) {
+        Placement placement = claimPlacement(width, height);
+        if (placement != null) {
+            applyAddedTexture(texture, bytes, width, height, placement);
             return texture;
         }
 
@@ -160,25 +159,21 @@ public final class TextureAtlas {
             return false;
         }
 
-        int removedX = ownedTexture.x();
-        int removedY = ownedTexture.y();
-        int removedWidth = ownedTexture.width();
-        int removedHeight = ownedTexture.height();
-        SlotSize removedSlot = slotSize(removedWidth, removedHeight);
+        SlotRegion removedSlot = slotRegion(ownedTexture);
         int previousHeight = currentHeight;
 
-        clearRect(removedX, removedY, removedSlot.width(), removedSlot.height());
+        clearRect(removedSlot.x(), removedSlot.y(), removedSlot.paddedWidth(), removedSlot.paddedHeight());
         ownedTexture.invalidate();
 
         if (textures.isEmpty()) {
             resetAtlasState();
         } else {
             refreshLayoutState();
-            addFreeRect(removedX, removedY, removedSlot.width(), removedSlot.height());
+            addFreeRect(removedSlot.x(), removedSlot.y(), removedSlot.paddedWidth(), removedSlot.paddedHeight());
             resetAppendState();
         }
-        finishMutationAfterPossibleShrink(previousHeight, removedX, removedY,
-            removedSlot.width(), removedSlot.height());
+        finishMutationAfterPossibleShrink(previousHeight, removedSlot.x(), removedSlot.y(),
+            removedSlot.paddedWidth(), removedSlot.paddedHeight());
         return true;
     }
 
@@ -215,64 +210,41 @@ public final class TextureAtlas {
         }
     }
 
-    private boolean tryAddToFreeRect(AtlasTexture texture, byte[] bytes, int width, int height) {
-        FreePlacement freePlacement = tryPlaceIntoFreeRect(width, height);
-        if (freePlacement == null) {
-            return false;
-        }
-        applyFreeRectAdd(texture, bytes, freePlacement.x(), freePlacement.y(), width, height);
-        return true;
-    }
-
-    private boolean tryAddByAppending(AtlasTexture texture, byte[] bytes, int width, int height) {
-        AppendPlacement placement = tryAppend(width, height);
-        if (placement == null) {
-            return false;
-        }
-        applyAppendAdd(texture, bytes, placement.x(), placement.y(), width, height,
-            placement.newRowHeight(), placement.newHeight());
-        return true;
-    }
-
     private void updateTextureWithinSlot(AtlasTexture texture, byte[] bytes, int width, int height) {
         int previousHeight = currentHeight;
         int x = texture.x();
         int y = texture.y();
-        SlotSize oldSlot = slotSize(texture.width(), texture.height());
-        SlotSize newSlot = slotSize(width, height);
+        SlotRegion oldSlot = slotRegion(texture);
+        SlotRegion newSlot = slotRegion(x, y, width, height);
 
-        clearRect(x, y, oldSlot.width(), oldSlot.height());
+        clearRect(x, y, oldSlot.paddedWidth(), oldSlot.paddedHeight());
         copyIntoAtlas(bytes, x, y, width, height);
         texture.setRegion(x, y, width, height);
 
-        addFreeRect(x + newSlot.width(), y, oldSlot.width() - newSlot.width(), oldSlot.height());
-        addFreeRect(x, y + newSlot.height(), newSlot.width(), oldSlot.height() - newSlot.height());
+        addFreeRect(x + newSlot.paddedWidth(), y, oldSlot.paddedWidth() - newSlot.paddedWidth(),
+            oldSlot.paddedHeight());
+        addFreeRect(x, y + newSlot.paddedHeight(), newSlot.paddedWidth(),
+            oldSlot.paddedHeight() - newSlot.paddedHeight());
 
         refreshLayoutState();
         resetAppendState();
-        finishMutationAfterPossibleShrink(previousHeight, x, y, oldSlot.width(), oldSlot.height());
+        finishMutationAfterPossibleShrink(previousHeight, x, y, oldSlot.paddedWidth(), oldSlot.paddedHeight());
     }
 
     private boolean relocateUpdatedTexture(AtlasTexture texture, byte[] bytes, int width, int height) {
         int textureIndex = requireRegisteredTexture(texture);
         AtlasStateSnapshot previousState = snapshotState();
-
-        int oldX = texture.x();
-        int oldY = texture.y();
-        SlotSize oldSlot = slotSize(texture.width(), texture.height());
+        SlotRegion oldSlot = slotRegion(texture);
 
         textures.remove(textureIndex);
-        addFreeRect(oldX, oldY, oldSlot.width(), oldSlot.height());
+        addFreeRect(oldSlot.x(), oldSlot.y(), oldSlot.paddedWidth(), oldSlot.paddedHeight());
         refreshLayoutState();
         resetAppendState();
 
-        if (tryRelocateToFreeRect(texture, textureIndex, bytes, width, height,
-            oldX, oldY, oldSlot.width(), oldSlot.height(), previousState.currentHeight())) {
-            return true;
-        }
-
-        if (tryRelocateByAppending(texture, textureIndex, bytes, width, height,
-            oldX, oldY, oldSlot.width(), oldSlot.height(), previousState.currentHeight())) {
+        Placement placement = claimPlacement(width, height);
+        if (placement != null) {
+            applyRelocatedUpdate(texture, textureIndex, bytes, width, height, oldSlot, placement,
+                previousState.currentHeight());
             return true;
         }
 
@@ -280,100 +252,43 @@ public final class TextureAtlas {
         return packAllAndApply(texture, bytes, width, height, true);
     }
 
-    private boolean tryRelocateToFreeRect(AtlasTexture texture,
-                                          int textureIndex,
-                                          byte[] bytes,
-                                          int width,
-                                          int height,
-                                          int oldX,
-                                          int oldY,
-                                          int oldSlotWidth,
-                                          int oldSlotHeight,
-                                          int previousHeight) {
-        FreePlacement freePlacement = tryPlaceIntoFreeRect(width, height);
-        if (freePlacement == null) {
-            return false;
-        }
-        applyRelocatedUpdate(texture, textureIndex, bytes, width, height, oldX, oldY,
-            oldSlotWidth, oldSlotHeight, freePlacement.x(), freePlacement.y(), false, 0, previousHeight);
-        return true;
-    }
-
-    private boolean tryRelocateByAppending(AtlasTexture texture,
-                                           int textureIndex,
-                                           byte[] bytes,
-                                           int width,
-                                           int height,
-                                           int oldX,
-                                           int oldY,
-                                           int oldSlotWidth,
-                                           int oldSlotHeight,
-                                           int previousHeight) {
-        AppendPlacement appendPlacement = tryAppend(width, height);
-        if (appendPlacement == null) {
-            return false;
-        }
-        applyRelocatedUpdate(texture, textureIndex, bytes, width, height, oldX, oldY,
-            oldSlotWidth, oldSlotHeight, appendPlacement.x(), appendPlacement.y(), true,
-            appendPlacement.newRowHeight(), previousHeight);
-        return true;
-    }
-
     private void applyRelocatedUpdate(AtlasTexture texture,
                                       int textureIndex,
                                       byte[] bytes,
                                       int width,
                                       int height,
-                                      int oldX,
-                                      int oldY,
-                                      int oldSlotWidth,
-                                      int oldSlotHeight,
-                                      int newX,
-                                      int newY,
-                                      boolean appended,
-                                      int newRowHeight,
+                                      SlotRegion oldSlot,
+                                      Placement placement,
                                       int previousHeight) {
-        SlotSize newSlot = slotSize(width, height);
-        int newContentBottom = Math.max(contentBottom, newY + height);
-        int newLayoutBottom = Math.max(layoutBottom, newY + newSlot.height());
-        int newHeight = atlasHeightForContent(newContentBottom);
+        SlotRegion newSlot = slotRegion(placement.x(), placement.y(), width, height);
+        int interimHeight = currentHeight;
 
-        if (newHeight > currentHeight) {
-            clearRows(currentHeight, newHeight - currentHeight);
-        }
-
-        clearRect(oldX, oldY, oldSlotWidth, oldSlotHeight);
-        clearRect(newX, newY, newSlot.width(), newSlot.height());
-        copyIntoAtlas(bytes, newX, newY, width, height);
-        subtractFreeArea(newX, newY, newSlot.width(), newSlot.height());
-
-        texture.setRegion(newX, newY, width, height);
+        clearExpandedRows(interimHeight, placement.newHeight());
+        clearRect(oldSlot.x(), oldSlot.y(), oldSlot.paddedWidth(), oldSlot.paddedHeight());
+        writeTextureAtPlacement(texture, bytes, newSlot, placement);
         textures.add(Math.min(textureIndex, textures.size()), texture);
-        contentBottom = newContentBottom;
-        layoutBottom = newLayoutBottom;
-        currentHeight = newHeight;
 
-        if (appended) {
-            appendX = newX + newSlot.width();
-            appendY = newY;
-            appendRowHeight = newRowHeight;
-        } else {
-            resetAppendState();
-        }
-
-        if (newHeight < previousHeight) {
-            clearRows(newHeight, previousHeight - newHeight);
+        if (currentHeight < previousHeight) {
+            clearRows(currentHeight, previousHeight - currentHeight);
         }
 
         if (currentHeight != previousHeight) {
             markWholeAtlasDirty();
         } else {
-            markDirtyClamped(oldX, oldY, oldSlotWidth, oldSlotHeight);
-            markDirtyClamped(newX, newY, newSlot.width(), newSlot.height());
+            markDirtyClamped(oldSlot.x(), oldSlot.y(), oldSlot.paddedWidth(), oldSlot.paddedHeight());
+            markDirtyClamped(newSlot.x(), newSlot.y(), newSlot.paddedWidth(), newSlot.paddedHeight());
         }
     }
 
-    private AppendPlacement tryAppend(int width, int height) {
+    private Placement claimPlacement(int width, int height) {
+        Placement freeRectPlacement = claimFreeRectPlacement(width, height);
+        if (freeRectPlacement != null) {
+            return freeRectPlacement;
+        }
+        return claimAppendPlacement(width, height);
+    }
+
+    private Placement claimAppendPlacement(int width, int height) {
         SlotSize slot = slotSize(width, height);
         int candidateX = appendX;
         int candidateY = appendY;
@@ -396,10 +311,11 @@ public final class TextureAtlas {
         int newContentBottom = Math.max(contentBottom, candidateY + height);
         int newHeight = atlasHeightForContent(newContentBottom);
 
-        return new AppendPlacement(candidateX, candidateY, Math.max(candidateRowHeight, slot.height()), newHeight);
+        return new Placement(candidateX, candidateY, slot.width(), slot.height(), newHeight,
+            Math.max(candidateRowHeight, slot.height()), true);
     }
 
-    private FreePlacement tryPlaceIntoFreeRect(int width, int height) {
+    private Placement claimFreeRectPlacement(int width, int height) {
         SlotSize slot = slotSize(width, height);
         int bestIndex = -1;
         int bestWaste = Integer.MAX_VALUE;
@@ -435,56 +351,23 @@ public final class TextureAtlas {
         // Split the consumed free rect into non-overlapping right and bottom leftovers.
         addFreeRect(freeRect.x + slot.width(), freeRect.y, freeRect.width - slot.width(), freeRect.height);
         addFreeRect(freeRect.x, freeRect.y + slot.height(), slot.width(), freeRect.height - slot.height());
-        return new FreePlacement(freeRect.x, freeRect.y);
-    }
-
-    private void applyFreeRectAdd(AtlasTexture texture, byte[] bytes, int x, int y, int width, int height) {
-        int previousHeight = currentHeight;
-        SlotSize slot = slotSize(width, height);
-        int newContentBottom = Math.max(contentBottom, y + height);
+        int newContentBottom = Math.max(contentBottom, freeRect.y + height);
         int newHeight = atlasHeightForContent(newContentBottom);
-        if (newHeight > previousHeight) {
-            clearRows(previousHeight, newHeight - previousHeight);
-        }
-
-        clearRect(x, y, slot.width(), slot.height());
-        copyIntoAtlas(bytes, x, y, width, height);
-        texture.setRegion(x, y, width, height);
-        textures.add(texture);
-        contentBottom = newContentBottom;
-        layoutBottom = Math.max(layoutBottom, y + slot.height());
-        currentHeight = newHeight;
-        resetAppendState();
-        finishMutationAfterAnyHeightChange(previousHeight, x, y, width, height);
+        return new Placement(freeRect.x, freeRect.y, slot.width(), slot.height(), newHeight, 0, false);
     }
 
-    private void applyAppendAdd(AtlasTexture texture,
-                                byte[] bytes,
-                                int x,
-                                int y,
-                                int width,
-                                int height,
-                                int newRowHeight,
-                                int newHeight) {
+    private void applyAddedTexture(AtlasTexture texture,
+                                   byte[] bytes,
+                                   int width,
+                                   int height,
+                                   Placement placement) {
         int previousHeight = currentHeight;
-        SlotSize slot = slotSize(width, height);
-        if (newHeight > previousHeight) {
-            clearRows(previousHeight, newHeight - previousHeight);
-        }
+        SlotRegion slot = slotRegion(placement.x(), placement.y(), width, height);
 
-        clearRect(x, y, slot.width(), slot.height());
-        copyIntoAtlas(bytes, x, y, width, height);
-        subtractFreeArea(x, y, slot.width(), slot.height());
-
-        texture.setRegion(x, y, width, height);
+        clearExpandedRows(previousHeight, placement.newHeight());
+        writeTextureAtPlacement(texture, bytes, slot, placement);
         textures.add(texture);
-        contentBottom = Math.max(contentBottom, y + height);
-        layoutBottom = Math.max(layoutBottom, y + slot.height());
-        currentHeight = newHeight;
-        appendX = x + slot.width();
-        appendY = y;
-        appendRowHeight = newRowHeight;
-        finishMutationAfterAnyHeightChange(previousHeight, x, y, width, height);
+        finishMutationAfterAnyHeightChange(previousHeight, slot.x(), slot.y(), width, height);
     }
 
     private boolean packAllAndApply(AtlasTexture specialTexture,
@@ -627,6 +510,23 @@ public final class TextureAtlas {
         markWholeAtlasDirty();
     }
 
+    private void writeTextureAtPlacement(AtlasTexture texture,
+                                         byte[] bytes,
+                                         SlotRegion slot,
+                                         Placement placement) {
+        clearRect(slot.x(), slot.y(), slot.paddedWidth(), slot.paddedHeight());
+        copyIntoAtlas(bytes, slot.x(), slot.y(), slot.width(), slot.height());
+        if (placement.appended()) {
+            subtractFreeArea(slot.x(), slot.y(), slot.paddedWidth(), slot.paddedHeight());
+        }
+
+        texture.setRegion(slot.x(), slot.y(), slot.width(), slot.height());
+        contentBottom = Math.max(contentBottom, slot.contentBottom());
+        layoutBottom = Math.max(layoutBottom, slot.layoutBottom());
+        currentHeight = placement.newHeight();
+        updateAppendState(placement);
+    }
+
     private void copyIntoAtlas(byte[] source, int x, int y, int width, int height) {
         int rowBytes = multiplyExact(width, bytesPerPixel, "texture row is too large");
         for (int row = 0; row < height; row++) {
@@ -722,6 +622,12 @@ public final class TextureAtlas {
         appendRowHeight = snapshot.appendRowHeight();
     }
 
+    private void clearExpandedRows(int previousHeight, int newHeight) {
+        if (newHeight > previousHeight) {
+            clearRows(previousHeight, newHeight - previousHeight);
+        }
+    }
+
     private void finishMutationAfterPossibleShrink(int previousHeight,
                                                    int dirtyX,
                                                    int dirtyY,
@@ -761,10 +667,7 @@ public final class TextureAtlas {
     }
 
     private void markDirtyClamped(int x, int y, int width, int height) {
-        if (y >= currentHeight) {
-            return;
-        }
-        int clippedHeight = Math.min(y + height, currentHeight) - y;
+        int clippedHeight = clipHeightToCurrentAtlas(y, height);
         if (clippedHeight <= 0) {
             return;
         }
@@ -865,6 +768,16 @@ public final class TextureAtlas {
         appendRowHeight = 0;
     }
 
+    private void updateAppendState(Placement placement) {
+        if (placement.appended()) {
+            appendX = placement.x() + placement.paddedWidth();
+            appendY = placement.y();
+            appendRowHeight = placement.newRowHeight();
+            return;
+        }
+        resetAppendState();
+    }
+
     private void validateTextureBytes(byte[] bytes, int width, int height) {
         Objects.requireNonNull(bytes, "bytes");
         if (width <= 0) {
@@ -898,6 +811,13 @@ public final class TextureAtlas {
         return y * rowStrideBytes + x * bytesPerPixel;
     }
 
+    private int clipHeightToCurrentAtlas(int y, int height) {
+        if (y >= currentHeight) {
+            return 0;
+        }
+        return Math.min(y + height, currentHeight) - y;
+    }
+
     private int atlasHeightForContent(int contentBottom) {
         if (contentBottom <= 0) {
             return minHeight;
@@ -906,6 +826,15 @@ public final class TextureAtlas {
             return minHeight;
         }
         return Math.min(PowerOfTwo.ceil(contentBottom), maxHeight);
+    }
+
+    private SlotRegion slotRegion(AtlasTexture texture) {
+        return slotRegion(texture.x(), texture.y(), texture.width(), texture.height());
+    }
+
+    private SlotRegion slotRegion(int x, int y, int width, int height) {
+        SlotSize slot = slotSize(width, height);
+        return new SlotRegion(x, y, width, height, slot.width(), slot.height());
     }
 
     private SlotSize slotSize(int width, int height) {
@@ -941,13 +870,32 @@ public final class TextureAtlas {
         return (int) value;
     }
 
-    private record FreePlacement(int x, int y) {
-    }
-
-    private record AppendPlacement(int x, int y, int newRowHeight, int newHeight) {
+    private record Placement(int x,
+                             int y,
+                             int paddedWidth,
+                             int paddedHeight,
+                             int newHeight,
+                             int newRowHeight,
+                             boolean appended) {
     }
 
     private record SlotSize(int width, int height) {
+    }
+
+    private record SlotRegion(int x,
+                              int y,
+                              int width,
+                              int height,
+                              int paddedWidth,
+                              int paddedHeight) {
+
+        private int contentBottom() {
+            return y + height;
+        }
+
+        private int layoutBottom() {
+            return y + paddedHeight;
+        }
     }
 
     private record AtlasStateSnapshot(int contentBottom,
@@ -976,7 +924,7 @@ public final class TextureAtlas {
         private final int x;
         private final int y;
         private final int width;
-        private int height;
+        private final int height;
 
         private FreeRect(int x, int y, int width, int height) {
             this.x = x;

@@ -394,7 +394,14 @@ public final class STBRectPack {
     /** Compare two rect indices: height desc, width desc. Negative ⇒ a should come first. */
     private static int compare(int[] hs, int[] ws, int a, int b) {
         int dh = hs[b] - hs[a];
-        return dh != 0 ? dh : ws[b] - ws[a];
+        if (dh != 0) {
+            return dh;
+        }
+        int dw = ws[b] - ws[a];
+        if (dw != 0) {
+            return dw;
+        }
+        return a - b;
     }
 
     private static void swap(int[] arr, int i, int j) {
@@ -435,6 +442,13 @@ public final class STBRectPack {
 
     private static int compareRects(Rect[] rects, int a, int b) {
         int dh = rects[b].h - rects[a].h;
-        return dh != 0 ? dh : rects[b].w - rects[a].w;
+        if (dh != 0) {
+            return dh;
+        }
+        int dw = rects[b].w - rects[a].w;
+        if (dw != 0) {
+            return dw;
+        }
+        return rects[a].id - rects[b].id;
     }
 }

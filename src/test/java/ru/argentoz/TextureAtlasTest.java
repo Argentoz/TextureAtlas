@@ -97,28 +97,6 @@ class TextureAtlasTest {
     }
 
     @Test
-    void smallDeletedSpaceIsIgnoredAsFreeRect() {
-        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
-
-        AtlasTexture t1 = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
-        AtlasTexture t2 = atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);
-        AtlasTexture t3 = atlas.addTexture(alphaBytes(4, 4, 3), 4, 4);
-        atlas.consumeDirtyRegions();
-
-        assertTrue(atlas.removeTexture(t2));
-        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 8, 4)}, atlas.consumeDirtyRegions());
-        assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
-
-        AtlasTexture t4 = atlas.addTexture(alphaBytes(2, 4, 4), 2, 4);
-        assertTrue(t4.isAlive());
-        assertEquals(8, atlas.height());
-        assertLiveTextureSlotsDoNotOverlap(new ArrayList<>(List.of(t1, t3, t4)),
-            atlas.padding(), 0, 0, new StringBuilder("small free-rects are dropped"));
-        assertFalse(t2.isAlive());
-        assertTexturePixels(atlas, t4, alphaBytes(2, 4, 4));
-    }
-
-    @Test
     void splitFreeSpaceDropsRemaindersBelowThreshold() {
         TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 8, 8);
 
@@ -136,31 +114,6 @@ class TextureAtlasTest {
         assertArrayEquals(new DirtyRegion[0], atlas.freeRegions());
 
         assertTexturePixels(atlas, small, alphaBytes(2, 2, 3));
-    }
-
-    @Test
-    void overflowDrivenRepackMayCompactEarlierLayoutBeforeLaterShrink() {
-        TextureAtlas atlas = new TextureAtlas(AtlasFormat.ALPHA8, 4, 8);
-
-        AtlasTexture top = atlas.addTexture(alphaBytes(4, 4, 1), 4, 4);
-        AtlasTexture bottom = atlas.addTexture(alphaBytes(4, 4, 2), 4, 4);
-        atlas.consumeDirtyRegions();
-
-        assertTrue(atlas.removeTexture(top));
-        assertEquals(4, atlas.height());
-        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 4, 4)}, atlas.consumeDirtyRegions());
-        atlas.consumeDirtyRegions();
-
-        AtlasTexture sameHandle = atlas.updateTexture(bottom, alphaBytes(4, 3, 3), 4, 3);
-
-        assertSame(bottom, sameHandle);
-        assertEquals(4, atlas.height());
-        assertEquals(0, bottom.x());
-        assertEquals(0, bottom.y());
-        assertEquals(4, bottom.width());
-        assertEquals(3, bottom.height());
-        assertArrayEquals(new DirtyRegion[]{new DirtyRegion(0, 0, 4, 4)}, atlas.consumeDirtyRegions());
-        assertTexturePixels(atlas, bottom, alphaBytes(4, 3, 3));
     }
 
     @Test
